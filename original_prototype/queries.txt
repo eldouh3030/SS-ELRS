@@ -1,0 +1,10 @@
+SELECT patient_id, diagnosis, glucose_level FROM medical_records WHERE diagnosis = 'diabetes' AND glucose_level > 140;
+SELECT patient_id, glucose_level, insulin_status FROM medical_records WHERE glucose_level > 130 AND diagnosis = 'diabetes';
+SELECT record_id, heart_rate, ecg_signal FROM iomt_sensor_data WHERE heart_rate > 100;
+SELECT sensor_id, ecg_signal, heart_rate FROM iomt_sensor_data WHERE ecg_signal IS NOT NULL AND heart_rate > 95;
+SELECT orderkey, custkey, totalprice FROM orders WHERE totalprice > 1000;
+SELECT custkey, name, nationkey FROM customer WHERE nationkey = 5;
+SELECT patient_id, blood_pressure, diagnosis FROM medical_records WHERE blood_pressure > 130 AND diagnosis = 'hypertension';
+SELECT patient_id, diagnosis, blood_pressure FROM medical_records WHERE diagnosis = 'hypertension' AND blood_pressure > 120;
+SELECT partkey, suppkey, supplycost FROM partsupp WHERE supplycost > 500;
+SELECT supplier_id, nationkey, account_balance FROM supplier WHERE account_balance > 10000;
