@@ -43,3 +43,15 @@ ax.set_xlabel('Number of queries n'); ax.set_ylabel('SS-ELRS scheduling time (ms
 ax.set_title('(b) Scheduling overhead (wall-clock)',fontsize=9,loc='left')
 fig.tight_layout(); fig.savefig('fig7_theta_overhead.png',dpi=300,bbox_inches='tight')
 print('ok')
+# fig: semantic similarity vs shared input data (optional)
+import os
+if os.path.exists('final_similarity_bins.csv'):
+    b=pd.read_csv('final_similarity_bins.csv'); b=b[b.pairs>0]
+    fig,ax=plt.subplots(figsize=(3.4,2.5))
+    for w,c,lab in [('healthcare','#2a78d6','Healthcare/IoMT'),('tpch','#eb6834','TPC-H-style')]:
+        g=b[b.workload==w].groupby('bin_lo').mean_overlap; mu,sd=g.mean(),g.std()
+        x=mu.index+0.05
+        ax.errorbar(x,mu.values,yerr=sd.values,fmt='-o',color=c,lw=2,ms=4,capsize=2,label=lab)
+    ax.set_xlabel('Cosine similarity of query pair (bin centre)'); ax.set_ylabel('Shared input data\n(weighted Jaccard)')
+    ax.set_xlim(0,1); ax.set_ylim(0,0.8); ax.legend(frameon=False,fontsize=8,loc='upper left')
+    fig.tight_layout(); fig.savefig('fig8_similarity_overlap.png',dpi=300,bbox_inches='tight')

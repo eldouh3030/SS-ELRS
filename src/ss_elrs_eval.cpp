@@ -398,6 +398,62 @@ void runPull(Sim& s, const vector<Query>& Q, const vector<int>& arrival, int loo
     s.m.makespan = mk;
 }
 
+// TF-IDF vectors exactly as in semanticCluster(), exposed for the similarity/data-overlap analysis
+vector<vector<pair<int, double>>> tfidfVectors(const vector<Query>& Q) {
+    int n = (int)Q.size();
+    unordered_map<string, int> vocab; vector<unordered_map<int, double>> tf(n); vector<int> df;
+    for (int i = 0; i < n; ++i) {
+        auto toks = tokenize(Q[i].sql);
+        for (auto& t : toks) {
+            auto it = vocab.find(t);
+            int id = it == vocab.end() ? (vocab[t] = (int)df.size(), df.push_back(0), (int)df.size() - 1) : it->second;
+            tf[i][id] += 1.0;
+        }
+        for (auto& kv : tf[i]) { kv.second /= max<size_t>(1, toks.size()); df[kv.first]++; }
+    }
+    vector<vector<pair<int, double>>> v(n);
+    for (int i = 0; i < n; ++i) {
+        double norm = 0;
+        for (auto& kv : tf[i]) { double w = kv.second * (log((1.0 + n) / (1.0 + df[kv.first])) + 1.0); v[i].push_back({kv.first, w}); norm += w * w; }
+        norm = sqrt(norm); for (auto& q : v[i]) q.second /= norm; sort(v[i].begin(), v[i].end());
+    }
+    return v;
+}
+double cosineSparse(const vector<pair<int, double>>& a, const vector<pair<int, double>>& b) {
+    double d = 0; size_t x = 0, y = 0;
+    while (x < a.size() && y < b.size()) {
+        if (a[x].first == b[y].first) d += a[x++].second * b[y++].second;
+        else if (a[x].first < b[y].first) ++x; else ++y;
+    }
+    return d;
+}
+// size-weighted Jaccard overlap of the input partitions of two queries
+double dataOverlap(const Query& a, const Query& b, const World& w) {
+    double inter = 0, uni = 0; size_t x = 0, y = 0;
+    while (x < a.parts.size() || y < b.parts.size()) {
+        if (y >= b.parts.size() || (x < a.parts.size() && a.parts[x] < b.parts[y])) { uni += w.parts[a.parts[x++]].sizeMB; }
+        else if (x >= a.parts.size() || b.parts[y] < a.parts[x]) { uni += w.parts[b.parts[y++]].sizeMB; }
+        else { double s0 = w.parts[a.parts[x]].sizeMB; inter += s0; uni += s0; ++x; ++y; }
+    }
+    return uni > 0 ? inter / uni : 0;
+}
+vector<double> ranks(const vector<double>& v) {
+    vector<int> idx(v.size()); iota(idx.begin(), idx.end(), 0);
+    sort(idx.begin(), idx.end(), [&](int a, int b) { return v[a] < v[b]; });
+    vector<double> r(v.size());
+    for (size_t i = 0; i < idx.size();) {
+        size_t j = i; while (j + 1 < idx.size() && v[idx[j + 1]] == v[idx[i]]) ++j;
+        double avg = (i + j) / 2.0 + 1; for (size_t k = i; k <= j; ++k) r[idx[k]] = avg; i = j + 1;
+    }
+    return r;
+}
+double pearson(const vector<double>& a, const vector<double>& b) {
+    double ma = accumulate(a.begin(), a.end(), 0.0) / a.size(), mb = accumulate(b.begin(), b.end(), 0.0) / b.size();
+    double sab = 0, saa = 0, sbb = 0;
+    for (size_t i = 0; i < a.size(); ++i) { sab += (a[i] - ma) * (b[i] - mb); saa += (a[i] - ma) * (a[i] - ma); sbb += (b[i] - mb) * (b[i] - mb); }
+    return sab / sqrt(saa * sbb);
+}
+
 // ------------------------------------------------------------------ Stage 3: Eq. (8) placement
 struct Chunk { int cluster; vector<int> qs; vector<int> parts; double sizeMB = 0; double work = 0; };
 
@@ -690,6 +746,56 @@ int main(int argc, char** argv) {
                 auto o = runOnce(true, n, seed, c, {"SSELRS"});
                 f << n << "," << r << "," << o.clusterMs << "," << o.by["SSELRS"].schedMs << "," << o.by["SSELRS"].makespan << "\n";
             }
+    } else if (mode == "scale") { // more nodes and larger workloads
+        ofstream f(pre + "_scale.csv");
+        f << "workload,nodes,n,run,method,shuffleMB,commCost,locality,makespan,utilization,schedMs\n";
+        f << fixed << setprecision(6);
+        for (int hc = 1; hc >= 0; --hc)
+            for (int m : {4, 8, 16})
+                for (int n : {1000, 4000})
+                    for (int r = 0; r < runs; ++r) {
+                        Config cc = c; cc.nodes = m;
+                        unsigned seed = 31337u * (unsigned)(r + 1) + (unsigned)n * 7u + (unsigned)m * 101u + (unsigned)hc;
+                        auto o = runOnce(hc, n, seed, cc, {"HASH", "LL", "DELAY", "SSELRS"});
+                        for (auto& kv : o.by) {
+                            auto& mm = kv.second;
+                            f << (hc ? "healthcare" : "tpch") << "," << m << "," << n << "," << r << "," << kv.first << ","
+                              << mm.shuffleMB << "," << mm.commCost << "," << mm.locality() << "," << mm.makespan << ","
+                              << mm.busy / (m * mm.makespan) << "," << mm.schedMs << "\n";
+                        }
+                        cerr << "." << flush;
+                    }
+        cerr << "\n";
+    } else if (mode == "similarity") { // does semantic similarity predict shared input data?
+        ofstream f(pre + "_similarity.csv"), fb(pre + "_similarity_bins.csv");
+        f << "workload,run,pairs,pearson,spearman,within_overlap,between_overlap,within_pairs,between_pairs\n";
+        fb << "workload,run,bin_lo,bin_hi,pairs,mean_overlap\n";
+        f << fixed << setprecision(6); fb << fixed << setprecision(6);
+        for (int hc = 1; hc >= 0; --hc)
+            for (int r = 0; r < runs; ++r) {
+                unsigned seed = 2718u * (unsigned)(r + 1) + (unsigned)hc;
+                mt19937 rng(seed);
+                World w = buildWorld(hc, c, rng);
+                vector<Query> Q = hc ? genHealthcare(500, w, rng) : genTpch(500, w, rng);
+                semanticCluster(Q, c.theta);
+                auto v = tfidfVectors(Q);
+                vector<double> sim, ov; double win = 0, btw = 0; long nw = 0, nb = 0;
+                vector<double> binSum(10, 0); vector<long> binN(10, 0);
+                for (size_t i = 0; i < Q.size(); ++i)
+                    for (size_t j = i + 1; j < Q.size(); ++j) {
+                        double sc = cosineSparse(v[i], v[j]), o = dataOverlap(Q[i], Q[j], w);
+                        sim.push_back(sc); ov.push_back(o);
+                        if (Q[i].cluster == Q[j].cluster) { win += o; nw++; } else { btw += o; nb++; }
+                        int b = min(9, max(0, (int)(sc * 10))); binSum[b] += o; binN[b]++;
+                    }
+                f << (hc ? "healthcare" : "tpch") << "," << r << "," << sim.size() << "," << pearson(sim, ov) << ","
+                  << pearson(ranks(sim), ranks(ov)) << "," << (nw ? win / nw : 0) << "," << (nb ? btw / nb : 0) << "," << nw << "," << nb << "\n";
+                for (int b = 0; b < 10; ++b)
+                    fb << (hc ? "healthcare" : "tpch") << "," << r << "," << b / 10.0 << "," << (b + 1) / 10.0 << "," << binN[b] << ","
+                       << (binN[b] ? binSum[b] / binN[b] : 0) << "\n";
+                cerr << "." << flush;
+            }
+        cerr << "\n";
     }
     return 0;
 }
